@@ -1,0 +1,56 @@
+name: sing-box 镜像备份
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # 每天早上 6 点自动运行
+  workflow_dispatch:      # 允许你点击按钮手动运行
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 必须有写入权限才能发布 Release
+
+    steps:
+      - name: 检查原仓库最新版本
+        id: check_version
+        run: |
+          # 获取原作者最新的 Tag 名字
+          LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+          echo "发现原作者最新版本为: $LATEST_TAG"
+      - name: 检查我的仓库是否存在该版本
+        id: check_mine
+        run: |
+          # 检查自己的 Release 列表
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ env.LATEST_TAG }})
+          if [ "$HTTP_STATUS" == "200" ]; then
+            echo "EXISTS=true" >> $GITHUB_ENV
+            echo "版本已存在，无需同步。"
+          else
+            echo "EXISTS=false" >> $GITHUB_ENV
+            echo "版本不存在，准备搬运..."
+          fi
+      - name: 下载原作者所有资产 (Assets)
+        if: env.EXISTS == 'false'
+        run: |
+          # 获取原作者最新 Release 的所有下载链接
+          mkdir -p ./downloads
+          curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+          | jq -r '.assets[].browser_download_url' \
+          | xargs -n 1 -P 4 wget -P ./downloads/
+          echo "所有文件下载完成。"
+      - name: 发布到我的仓库
+        if: env.EXISTS == 'false'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.LATEST_TAG }}
+          name: Release ${{ env.LATEST_TAG }}
+          body: |
+            自动同步自 mhsanaei/3x-ui
+            版本号: ${{ env.LATEST_TAG }}
+          files: ./downloads/* # 上传下载文件夹里的所有文件
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
