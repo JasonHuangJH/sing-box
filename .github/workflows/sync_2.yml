@@ -1,0 +1,78 @@
+name: Sync Releases
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 每天自动检查同步一次
+  workflow_dispatch: # 支持在 Actions 页面手动触发
+
+# 显式声明写入权限，解决 403 报错
+permissions:
+  contents: write
+
+jobs:
+  sync-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Sync Releases from Upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: "SagerNet/sing-box" # ⚠️ 替换为原仓库的 用户名/仓库名
+        run: |
+          set -e
+
+          echo "检查 $UPSTREAM_REPO 的最新 Releases..."
+          releases=$(gh api repos/$UPSTREAM_REPO/releases --jq '.[0:10][] | .tag_name' 2>/dev/null || echo "")
+
+          if [ -z "$releases" ]; then
+            echo "未找到任何 Release，退出同步。"
+            exit 0
+          fi
+
+          for tag in $releases; do
+            echo "------------------------------------------------"
+            echo "正在检查 Release: $tag"
+
+            # 检查 Fork 仓库是否已经存在该 Release
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              echo "发现新 Release: $tag，开始同步..."
+
+              # 获取 release 详细元数据
+              rel_json=$(gh api repos/$UPSTREAM_REPO/releases/tags/$tag)
+              title=$(echo "$rel_json" | jq -r '.name // .tag_name')
+              body=$(echo "$rel_json" | jq -r '.body // ""')
+              is_draft=$(echo "$rel_json" | jq -r '.draft')
+              is_prerelease=$(echo "$rel_json" | jq -r '.prerelease')
+
+              # 每次循环清理临时目录
+              rm -rf tmp_assets && mkdir -p tmp_assets
+
+              # 下载原仓库 Release 的所有附件资产
+              echo "下载 Release 附件..."
+              gh release download "$tag" --repo "$UPSTREAM_REPO" --dir tmp_assets || echo "部分或全部附件下载失败/无附件"
+
+              # 构建创建 Release 的命令参数
+              flags=()
+              [ "$is_draft" = "true" ] && flags+=("--draft")
+              [ "$is_prerelease" = "true" ] && flags+=("--prerelease")
+
+              # 在 Fork 仓库中发布 Release 及其附件
+              echo "创建本地 Release..."
+              if [ -n "$(ls -A tmp_assets 2>/dev/null)" ]; then
+                find tmp_assets -type f -print0 | xargs -0 gh release create "$tag" --title "$title" --notes "$body" "${flags[@]}" || echo "Release $tag 发布失败"
+              else
+                gh release create "$tag" --title "$title" --notes "$body" "${flags[@]}" || echo "Release $tag 发布失败"
+              fi
+
+              rm -rf tmp_assets
+              echo "$tag 同步完成！"
+            else
+              echo "Release $tag 已存在，跳过。"
+            fi
+          done
+          echo "------------------------------------------------"
+          echo "全部 Release 检查与同步完成！"
